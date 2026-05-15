@@ -4,20 +4,23 @@ import requests
 import re
 import time
 from gtts import gTTS
-from dotenv import load_dotenv
 from moviepy import VideoFileClip, AudioFileClip, TextClip, CompositeVideoClip, concatenate_videoclips
 
-# --- LOAD SECRETS ---
-load_dotenv()
-PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
-OUTPUT_DIR = "output_assets"
+# --- SECRETS HANDLING ---
+# Streamlit Cloud uses st.secrets, Local uses .env or manual keys.
+# This check handles both automatically.
+if "PEXELS_API_KEY" in st.secrets:
+    PEXELS_API_KEY = st.secrets["PEXELS_API_KEY"]
+else:
+    # Fallback for local testing if you don't have secrets.toml
+    PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "YOUR_KEY_HERE")
 
+OUTPUT_DIR = "output_assets"
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
-# --- CORE LOGIC ---
 def get_keyword(text):
-    stop_words = {'this', 'that', 'with', 'from', 'here', 'there', 'what', 'about', 'just', 'then'}
+    stop_words = {'this', 'that', 'with', 'from', 'here', 'there', 'what', 'about', 'just', 'then', 'into', 'when'}
     words = [w for w in re.findall(r'\w+', text.lower()) if len(w) > 3 and w not in stop_words]
     return max(words, key=len) if words else "abstract"
 
@@ -34,24 +37,39 @@ def fetch_stock_video(keyword, duration, output_path, target_size):
     orientation = "portrait" if target_size[0] < target_size[1] else "landscape"
     url = f"https://api.pexels.com/videos/search?query={keyword}&per_page=1&orientation={orientation}"
     
-    # High-reliability fallback
-    fallback_url = "https://player.vimeo.com/external/371433846.sd.mp4?s=236da2f3c0ee273d1ae87f1d80ac3dbec9b9ef96&profile_id=165&oauth2_token_id=57447761"
+    # NEW RELIABLE FALLBACK (Direct link to a sample MP4)
+    fallback_url = "https://www.w3schools.com/html/mov_bbb.mp4"
 
-    def download(url, path):
-        with requests.get(url, stream=True, timeout=20) as r:
-            r.raise_for_status()
+    def download(target_url, path):
+        # We don't use raise_for_status() inside the fallback attempt to avoid crashing
+        r = requests.get(target_url, stream=True, timeout=20)
+        if r.status_code == 200:
             with open(path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=1024*1024):
                     if chunk: f.write(chunk)
-        time.sleep(1)
+            return True
+        return False
+
+    if os.path.exists(output_path):
+        try: os.remove(output_path)
+        except: pass
 
     try:
-        r = requests.get(url, headers=headers, timeout=10).json()
-        video_url = r['videos'][0]['video_files'][0]['link']
-        download(video_url, output_path)
-        return VideoFileClip(output_path).subclipped(0, duration).resized(target_size)
-    except Exception:
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        video_url = data['videos'][0]['video_files'][0]['link']
+        
+        if download(video_url, output_path):
+            time.sleep(1)
+            return VideoFileClip(output_path).subclipped(0, duration).resized(target_size)
+        else:
+            raise Exception("Download failed")
+            
+    except Exception as e:
+        st.warning(f"⚠️ Search failed for '{keyword}', using fallback.")
         download(fallback_url, output_path)
+        time.sleep(1)
         return VideoFileClip(output_path).subclipped(0, duration).resized(target_size)
 
 def create_scene(text, index, target_size):
@@ -63,68 +81,52 @@ def create_scene(text, index, target_size):
     v_clip = v_clip.with_audio(AudioFileClip(audio_path))
     
     try:
-        # Dynamic font sizing based on video height
         f_size = int(target_size[1] * 0.05) 
         txt = TextClip(
             text=text, font_size=f_size, color='white', font='Arial',
             bg_color='black', method='caption', size=(target_size[0] - 60, None)
         ).with_duration(dur).with_position(('center', 'bottom'))
         return CompositeVideoClip([v_clip, txt])
-    except:
+    except Exception:
         return v_clip
 
-# --- STREAMLIT UI ---
+# --- UI ---
 st.set_page_config(page_title="AI Video Engine", layout="wide")
 
-st.sidebar.title("🛠️ Project Settings")
-if not PEXELS_API_KEY:
-    st.sidebar.error("❌ API Key not found in .env file!")
-else:
-    st.sidebar.success("✅ API Key Loaded")
-
+st.sidebar.title("🛠️ Settings")
 ratio_choice = st.sidebar.selectbox(
     "Aspect Ratio",
-    ["16:9 - YouTube/Desktop", "9:16 - TikTok/Shorts", "1:1 - Instagram/Square"]
+    ["16:9 - YouTube", "9:16 - Shorts", "1:1 - Square"]
 )
 
-# Resolution Mapping
-if "16:9" in ratio_choice:
-    target_size = (1280, 720)
-elif "9:16" in ratio_choice:
-    target_size = (720, 1280)
-else:
-    target_size = (1080, 1080)
+if "16:9" in ratio_choice: target_size = (1280, 720)
+elif "9:16" in ratio_choice: target_size = (720, 1280)
+else: target_size = (1080, 1080)
 
-st.title("🎬 DIY Pictory: Script to Video")
-script = st.text_area("Paste your full script here:", height=250, placeholder="Once upon a time...")
+st.title("🎬 DIY Pictory")
+script = st.text_area("Paste script:", height=200)
 
-if st.button("🚀 Start Generating", use_container_width=True):
-    if not PEXELS_API_KEY:
-        st.error("Please add your Pexels Key to the .env file first.")
+if st.button("🚀 Generate Video", use_container_width=True):
+    if not PEXELS_API_KEY or PEXELS_API_KEY == "YOUR_KEY_HERE":
+        st.error("Missing API Key! Add it to Streamlit Secrets.")
     elif not script:
-        st.error("The script is empty!")
+        st.error("Script is empty!")
     else:
         sentences = [s.strip() for s in re.split(r'[.!?]', script) if len(s.strip()) > 5]
         
-        with st.status("🎬 Processing...", expanded=True) as status:
+        with st.status("Building...", expanded=True) as status:
             clips = []
             for i, sent in enumerate(sentences):
-                status.write(f"Building Scene {i+1}...")
+                status.write(f"Scene {i+1}...")
                 clips.append(create_scene(sent, i, target_size))
             
-            status.write("🧵 Rendering Final Video...")
-            final = concatenate_videoclips(clips, method="compose")
+            status.write("Rendering...")
             final_path = "generated_video.mp4"
+            final = concatenate_videoclips(clips, method="compose")
             final.write_videofile(final_path, fps=24, codec="libx264", audio_codec="aac")
             
-            st.success("✨ Your video is ready!")
+            st.success("Video Ready!")
             st.video(final_path)
-
-with open(final_path, "rb") as file:
-                st.download_button(
-                    label="📥 Download Video",
-                    data=file,
-                    file_name="my_ai_video.mp4",
-                    mime="video/mp4",
-                    use_container_width=True
-                )
+            
+            with open(final_path, "rb") as f:
+                st.download_button("📥 Download Video", f, "video.mp4", "video/mp4")
