@@ -119,3 +119,12 @@ if st.button("🚀 Start Generating", use_container_width=True):
             
             st.success("✨ Your video is ready!")
             st.video(final_path)
+
+with open(final_path, "rb") as file:
+                st.download_button(
+                    label="📥 Download Video",
+                    data=file,
+                    file_name="my_ai_video.mp4",
+                    mime="video/mp4",
+                    use_container_width=True
+                )
